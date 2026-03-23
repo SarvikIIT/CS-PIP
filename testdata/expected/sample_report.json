@@ -1,0 +1,40 @@
+{
+  "container_id": "aabbccddeeff",
+  "command": "/bin/sh testdata/workloads/cpu_stress.sh 10 1",
+  "started_at": "2025-03-12T10:00:00Z",
+  "finished_at": "2025-03-12T10:00:10Z",
+  "exit_code": 0,
+  "resource_limits": {
+    "cpu_limit": "50%",
+    "mem_limit": "256m"
+  },
+  "profile": {
+    "cpu": {
+      "avg_percent": 49.8,
+      "peak_percent": 51.2,
+      "samples": 100
+    },
+    "memory": {
+      "avg_rss_kb": 4096,
+      "peak_rss_kb": 5120,
+      "vmswap_kb": 0
+    },
+    "page_faults": {
+      "minor": 1024,
+      "major": 0
+    },
+    "context_switches": {
+      "voluntary": 312,
+      "nonvoluntary": 5
+    },
+    "io": {
+      "read_bytes": 0,
+      "write_bytes": 0
+    }
+  },
+  "analysis": {
+    "workload_class": "cpu_bound",
+    "bottlenecks": [],
+    "notes": "CPU usage tracks close to the 50% cgroup limit throughout execution."
+  }
+}
