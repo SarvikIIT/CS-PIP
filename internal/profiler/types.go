@@ -22,8 +22,10 @@ type ProfileSnapshot struct {
     // Context Switches
     VolCtxSwitches     uint64     // Voluntary (waiting, sleep, I/O)
     InvCtxSwitches     uint64     // Involuntary (preempted by scheduler)
-    IOReadBytes  uint64
-    IOWriteBytes uint64
+
+    // I/O
+    IOReadBytes        uint64     // Bytes read from storage
+    IOWriteBytes       uint64     // Bytes written to storage
 }
 
 // MetricSeries is a collection of snapshots over time

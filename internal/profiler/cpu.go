@@ -1,3 +1,14 @@
+package profiler
+
+import (
+    "fmt"
+    "os"
+    "runtime"
+    "strconv"
+    "strings"
+    "time"
+)
+
 func readProcStat(pid int) ([]string, error) {
     path := fmt.Sprintf("/proc/%d/stat", pid)
 

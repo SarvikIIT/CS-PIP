@@ -10,7 +10,13 @@ import (
 )
 
 func GetSyscallStats(pid int) (map[string]uint64, error) {
-    outputFile := "/tmp/strace_out"
+    tmpFile, err := os.CreateTemp("", "strace_out_*")
+    if err != nil {
+        return nil, err
+    }
+    tmpFile.Close()
+    outputFile := tmpFile.Name()
+    defer os.Remove(outputFile)
 
     cmd := exec.Command(
         "strace",
@@ -21,7 +27,7 @@ func GetSyscallStats(pid int) (map[string]uint64, error) {
         "-o", outputFile,
     )
 
-    err := cmd.Start()
+    err = cmd.Start()
     if err != nil {
         return nil, err
     }
@@ -29,8 +35,8 @@ func GetSyscallStats(pid int) (map[string]uint64, error) {
     // sample for 2 seconds
     time.Sleep(2 * time.Second)
 
-    cmd.Process.Kill()
-    cmd.Wait()
+    _ = cmd.Process.Kill()
+    _ = cmd.Wait()
 
     file, err := os.Open(outputFile)
     if err != nil {

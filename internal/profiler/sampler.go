@@ -54,7 +54,7 @@ func StartSampler(pid int) []ProfileSnapshot {
         }
         readBytes, writeBytes, err := GetIOStats(pid)
         if err != nil {
-        readBytes, writeBytes = 0, 0
+            readBytes, writeBytes = 0, 0
         }
         snapshot := ProfileSnapshot{
             Timestamp:          time.Now(),

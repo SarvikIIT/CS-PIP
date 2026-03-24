@@ -1,6 +1,9 @@
 package profiler
 
-import "strconv"
+import (
+    "fmt"
+    "strconv"
+)
 
 func GetPageFaults(pid int) (uint64, uint64, error) {
     fields, err := readProcStat(pid)
@@ -9,7 +12,7 @@ func GetPageFaults(pid int) (uint64, uint64, error) {
     }
 
     if len(fields) < 12 {
-        return 0, 0, err
+        return 0, 0, fmt.Errorf("unexpected /proc/stat format: only %d fields", len(fields))
     }
 
     minflt, err := strconv.ParseUint(fields[9], 10, 64)
