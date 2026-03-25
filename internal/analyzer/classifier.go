@@ -1,15 +1,15 @@
 package analyzer
 
 import (
-	"math"
-
-	"github.com/yourmodule/internal/profiler"
+	"github.com/SarvikIIT/CS-PIP/internal/profiler"
 )
 
-func Classify(series []profiler.ProfileSnapshot, memLimit uint64) (string, string) {
+// Classify inspects a series of profile snapshots and returns the dominant
+// WorkloadType together with a ConfidenceLevel.
+func Classify(series []profiler.ProfileSnapshot, memLimit uint64) (WorkloadType, ConfidenceLevel) {
 	n := len(series)
 	if n < 2 {
-		return "Undetermined", "LOW"
+		return Unknown, LowConfidence
 	}
 
 	var totalCPU float64
@@ -40,14 +40,21 @@ func Classify(series []profiler.ProfileSnapshot, memLimit uint64) (string, strin
 		// RSS
 		totalRSS += float64(curr.MemRSSBytes)
 
-		// IO rate (bytes/sec)
-		deltaIO := (curr.IOReadBytes + curr.IOWriteBytes) -
-			(prev.IOReadBytes + prev.IOWriteBytes)
-		ioRate := float64(deltaIO) / dt
+		// IO rate (bytes/sec). Guard against counter reset / sampling errors
+		// where counters may drop to 0, which would underflow uint64.
+		currTotal := curr.IOReadBytes + curr.IOWriteBytes
+		prevTotal := prev.IOReadBytes + prev.IOWriteBytes
+		var ioRate float64
+		if currTotal >= prevTotal {
+			ioRate = float64(currTotal-prevTotal) / dt
+		}
 		totalIO += ioRate
 
-		// Major faults rate
-		deltaMaj := curr.MajorFaults - prev.MajorFaults
+		// Major faults rate. Guard against counter reset (set to 0 on error).
+		var deltaMaj uint64
+		if curr.MajorFaults >= prev.MajorFaults {
+			deltaMaj = curr.MajorFaults - prev.MajorFaults
+		}
 		majRate := float64(deltaMaj) / dt
 		totalMajflt += majRate
 
@@ -62,7 +69,8 @@ func Classify(series []profiler.ProfileSnapshot, memLimit uint64) (string, strin
 		if majRate > 100 {
 			majfltHighCount++
 		}
-		if float64(curr.MemRSSBytes) > 0.8*float64(memLimit) {
+		// Only compare against memLimit when it is meaningful (non-zero).
+		if memLimit > 0 && float64(curr.MemRSSBytes) > 0.8*float64(memLimit) {
 			memHighCount++
 		}
 		if ioRate > 10*1024*1024 {
@@ -81,27 +89,27 @@ func Classify(series []profiler.ProfileSnapshot, memLimit uint64) (string, strin
 	avgMajflt := totalMajflt / samples
 
 	// --- Classification ---
-	var workload string
+	var workload WorkloadType
 	var matchCount int
 
 	switch {
 	case avgCPU > 70 && avgIO < 1*1024*1024:
-		workload = "CPU-bound"
+		workload = CPUBound
 		matchCount = min(cpuHighCount, ioLowCount)
 
-	case avgMajflt > 100 || avgRSS > 0.8*float64(memLimit):
-		workload = "Memory-bound"
+	case avgMajflt > 100 || (memLimit > 0 && avgRSS > 0.8*float64(memLimit)):
+		workload = MemoryBound
 		matchCount = max(majfltHighCount, memHighCount)
 
 	case avgIO > 10*1024*1024 || avgCPU < 30:
-		workload = "I/O-bound"
+		workload = IOBound
 		matchCount = max(ioHighCount, cpuLowCount)
 
 	case avgCPU > 50 && avgIO > 5*1024*1024:
-		workload = "Mixed"
+		workload = Mixed
 
 	default:
-		workload = "Undetermined"
+		workload = Unknown
 	}
 
 	// --- Confidence ---
@@ -110,31 +118,17 @@ func Classify(series []profiler.ProfileSnapshot, memLimit uint64) (string, strin
 	return workload, confidence
 }
 
-func computeConfidence(count int, total int) string {
+func computeConfidence(count int, total int) ConfidenceLevel {
 	if total == 0 {
-		return "LOW"
+		return LowConfidence
 	}
 
 	ratio := float64(count) / float64(total)
 
 	if ratio >= 0.9 {
-		return "HIGH"
+		return HighConfidence
 	} else if ratio >= 0.6 {
-		return "MEDIUM"
+		return MediumConfidence
 	}
-	return "LOW"
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+	return LowConfidence
 }

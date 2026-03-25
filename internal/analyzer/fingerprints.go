@@ -3,7 +3,7 @@ package analyzer
 import (
 	"math"
 
-	"cspip/internal/profiler"
+	"github.com/SarvikIIT/CS-PIP/internal/profiler"
 )
 
 // ---------------- FINGERPRINT STRUCT ----------------
@@ -20,6 +20,25 @@ func BuildFingerprint(series profiler.MetricSeries, memLimit uint64) Fingerprint
 		return Fingerprint{Vector: []float64{}}
 	}
 
+	// Special case: a single sample has no deltas; compute from the snapshot.
+	if n == 1 {
+		sample := series[0]
+		avgCPU := sample.CPUPercent
+		avgMem := float64(sample.MemRSSBytes)
+		// No deltas available for IO, ctx, or faults.
+		var memNorm float64
+		if memLimit > 0 {
+			memNorm = avgMem / float64(memLimit)
+		}
+		return Fingerprint{Vector: []float64{
+			avgCPU / 100.0,
+			memNorm,
+			0, // IO
+			0, // context switches
+			0, // page faults
+		}}
+	}
+
 	var sumCPU float64
 	var sumMem float64
 	var sumIO float64
@@ -33,34 +52,41 @@ func BuildFingerprint(series profiler.MetricSeries, memLimit uint64) Fingerprint
 		// CPU
 		sumCPU += curr.CPUPercent
 
-		// Memory (normalized later)
+		// Memory (normalized later); include every sample from index 1 onwards,
+		// so the divisor is count (n-1) — consistent with the other averages.
 		sumMem += float64(curr.MemRSSBytes)
 
-		// IO delta
-		ioDelta := float64(
-			(curr.IOReadBytes - prev.IOReadBytes) +
-				(curr.IOWriteBytes - prev.IOWriteBytes),
-		)
-		sumIO += ioDelta
+		// IO delta with reset protection: if a counter decreases (sampling
+		// error sets it to 0), treat its delta as 0 to avoid uint64 underflow.
+		var readDelta, writeDelta uint64
+		if curr.IOReadBytes >= prev.IOReadBytes {
+			readDelta = curr.IOReadBytes - prev.IOReadBytes
+		}
+		if curr.IOWriteBytes >= prev.IOWriteBytes {
+			writeDelta = curr.IOWriteBytes - prev.IOWriteBytes
+		}
+		sumIO += float64(readDelta + writeDelta)
 
-		// Context switches delta
-		ctxDelta := float64(
-			(curr.VolCtxSwitches - prev.VolCtxSwitches) +
-				(curr.InvCtxSwitches - prev.InvCtxSwitches),
-		)
-		sumCtx += ctxDelta
+		// Context switches delta (guard against counter resets/underflow).
+		var volDelta, invDelta uint64
+		if curr.VolCtxSwitches >= prev.VolCtxSwitches {
+			volDelta = curr.VolCtxSwitches - prev.VolCtxSwitches
+		}
+		if curr.InvCtxSwitches >= prev.InvCtxSwitches {
+			invDelta = curr.InvCtxSwitches - prev.InvCtxSwitches
+		}
+		sumCtx += float64(volDelta + invDelta)
 
-		// Page faults delta
-		faultDelta := float64(
-			(curr.MajorFaults - prev.MajorFaults),
-		)
-		sumFault += faultDelta
+		// Page faults delta; guard against counter reset (curr < prev).
+		if curr.MajorFaults >= prev.MajorFaults {
+			sumFault += float64(curr.MajorFaults - prev.MajorFaults)
+		}
 	}
 
 	count := float64(n - 1)
 
 	avgCPU := sumCPU / count
-	avgMem := sumMem / float64(n)
+	avgMem := sumMem / count // divide by count (n-1), not n
 	avgIO := sumIO / count
 	avgCtx := sumCtx / count
 	avgFault := sumFault / count
@@ -72,21 +98,18 @@ func BuildFingerprint(series profiler.MetricSeries, memLimit uint64) Fingerprint
 		memNorm = avgMem / float64(memLimit)
 	}
 
-	// simple normalization (can be improved later)
 	cpuNorm := avgCPU / 100.0
 	ioNorm := avgIO / (1024 * 1024) // convert to MB scale
 	ctxNorm := avgCtx / 1000.0
 	faultNorm := avgFault / 100.0
 
-	vector := []float64{
+	return Fingerprint{Vector: []float64{
 		cpuNorm,
 		memNorm,
 		ioNorm,
 		ctxNorm,
 		faultNorm,
-	}
-
-	return Fingerprint{Vector: vector}
+	}}
 }
 
 // ---------------- DISTANCE METRIC ----------------

@@ -12,22 +12,34 @@ import (
 
 // DetectBottlenecks analyzes runtime data and cgroup stats
 // to identify system-level bottlenecks.
-func DetectBottlenecks(series []profiler.ProfileSnapshot, containerID string) []string {
-	var bottlenecks []string
+func DetectBottlenecks(series []profiler.ProfileSnapshot, containerID string) []Bottleneck {
+	var bottlenecks []Bottleneck
 
 	// CPU throttling
 	if throttled, err := checkCPUThrottling(containerID); err == nil && throttled {
-		bottlenecks = append(bottlenecks, "CPU Throttling")
+		bottlenecks = append(bottlenecks, Bottleneck{
+			Type:     "CPU Throttling",
+			Severity: "high",
+			Detail:   "Container CPU is being throttled (nr_throttled > 0 in cpu.stat).",
+		})
 	}
 
 	// Memory pressure
 	if memPressure, err := checkMemoryPressure(containerID); err == nil && memPressure {
-		bottlenecks = append(bottlenecks, "Memory Pressure")
+		bottlenecks = append(bottlenecks, Bottleneck{
+			Type:     "Memory Pressure",
+			Severity: "high",
+			Detail:   "Container is experiencing memory pressure based on cgroup metrics.",
+		})
 	}
 
 	// I/O saturation
 	if detectIOSaturation(series) {
-		bottlenecks = append(bottlenecks, "I/O Saturation")
+		bottlenecks = append(bottlenecks, Bottleneck{
+			Type:     "I/O Saturation",
+			Severity: "medium",
+			Detail:   "I/O write rate plateau detected over recent samples.",
+		})
 	}
 
 	return bottlenecks
@@ -136,7 +148,12 @@ func detectIOSaturation(series []profiler.ProfileSnapshot) bool {
 
 		validSamples++
 
-		deltaWrite := curr.IOWriteBytes - prev.IOWriteBytes
+		// Guard against counter reset: if curr < prev (e.g. sampler error set
+		// bytes to 0), treat the delta as 0 rather than underflowing uint64.
+		var deltaWrite uint64
+		if curr.IOWriteBytes >= prev.IOWriteBytes {
+			deltaWrite = curr.IOWriteBytes - prev.IOWriteBytes
+		}
 		rate := float64(deltaWrite) / dt
 
 		// plateau detection: growth stops

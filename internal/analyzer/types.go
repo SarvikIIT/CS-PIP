@@ -5,7 +5,7 @@ package analyzer
 type WorkloadType string
 
 const (
-	CPUbound    WorkloadType = "CPU-bound"
+	CPUBound    WorkloadType = "CPU-bound"
 	MemoryBound WorkloadType = "Memory-bound"
 	IOBound     WorkloadType = "I/O-bound"
 	Mixed       WorkloadType = "Mixed"
