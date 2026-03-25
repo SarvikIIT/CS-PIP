@@ -6,6 +6,10 @@ import (
 
 // Classify inspects a series of profile snapshots and returns the dominant
 // WorkloadType together with a ConfidenceLevel.
+//
+// series is the ordered sequence of profiler snapshots from StartSampler.
+// memLimit is the container's memory limit in bytes (0 means unknown/unlimited;
+// memory-pressure thresholds are skipped when memLimit == 0).
 func Classify(series []profiler.ProfileSnapshot, memLimit uint64) (WorkloadType, ConfidenceLevel) {
 	n := len(series)
 	if n < 2 {

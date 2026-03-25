@@ -19,7 +19,7 @@ func DetectBottlenecks(series []profiler.ProfileSnapshot, containerID string) []
 	if throttled, err := checkCPUThrottling(containerID); err == nil && throttled {
 		bottlenecks = append(bottlenecks, Bottleneck{
 			Type:     "CPU Throttling",
-			Severity: "high",
+			Severity: SeverityHigh,
 			Detail:   "Container CPU is being throttled (nr_throttled > 0 in cpu.stat).",
 		})
 	}
@@ -28,7 +28,7 @@ func DetectBottlenecks(series []profiler.ProfileSnapshot, containerID string) []
 	if memPressure, err := checkMemoryPressure(containerID); err == nil && memPressure {
 		bottlenecks = append(bottlenecks, Bottleneck{
 			Type:     "Memory Pressure",
-			Severity: "high",
+			Severity: SeverityHigh,
 			Detail:   "Container is experiencing memory pressure based on cgroup metrics.",
 		})
 	}
@@ -37,7 +37,7 @@ func DetectBottlenecks(series []profiler.ProfileSnapshot, containerID string) []
 	if detectIOSaturation(series) {
 		bottlenecks = append(bottlenecks, Bottleneck{
 			Type:     "I/O Saturation",
-			Severity: "medium",
+			Severity: SeverityMedium,
 			Detail:   "I/O write rate plateau detected over recent samples.",
 		})
 	}

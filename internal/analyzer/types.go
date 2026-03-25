@@ -25,10 +25,19 @@ const (
 
 // ---------------- BOTTLENECK ----------------
 
+// SeverityLevel describes how serious a detected bottleneck is.
+type SeverityLevel string
+
+const (
+	SeverityHigh   SeverityLevel = "high"
+	SeverityMedium SeverityLevel = "medium"
+	SeverityLow    SeverityLevel = "low"
+)
+
 type Bottleneck struct {
-	Type     string // cpu_throttling, memory_pressure, io_saturation
-	Severity string // CRITICAL, WARNING, INFO
-	Detail   string // human-readable explanation
+	Type     string        // cpu_throttling, memory_pressure, io_saturation
+	Severity SeverityLevel // SeverityHigh, SeverityMedium, SeverityLow
+	Detail   string        // human-readable explanation
 }
 
 // ---------------- PATTERN RESULT ----------------
