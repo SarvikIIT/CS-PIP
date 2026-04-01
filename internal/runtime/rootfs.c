@@ -30,7 +30,20 @@ int rootfs_setup(const char *rootfs_path)
     }
 
     /* ----------------------------------------------------------------
-     * Step 1: Bind-mount rootfs onto itself.
+     * Step 1a: Make the root mount private.
+     *
+     * After clone(CLONE_NEWNS) the new mount namespace inherits the
+     * parent's mount propagation, which is typically MS_SHARED.
+     * pivot_root(2) requires that the current root mount is NOT shared;
+     * making it private here prevents EINVAL from the kernel check.
+     * ---------------------------------------------------------------- */
+    if (mount("", "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) {
+        perror("mount --make-rprivate /");
+        return -1;
+    }
+
+    /* ----------------------------------------------------------------
+     * Step 1b: Bind-mount rootfs onto itself.
      *
      * pivot_root requires that new_root is a mount point.  The easiest
      * way to guarantee this is a bind mount.  MS_REC also re-binds any
