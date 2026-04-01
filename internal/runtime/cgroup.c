@@ -142,12 +142,14 @@ static long long parse_mem_limit(const char *limit)
 
 static void enable_controllers(void)
 {
-    /* Best-effort: some systems already have these enabled. */
-    const char *ctrl_path = "/sys/fs/cgroup/cspip/cgroup.subtree_control";
-    write_file(ctrl_path, "+cpu +memory");
-
-    /* Also enable at the root level if needed. */
+    /*
+     * Enable controllers top-down: the root cgroup must expose a controller
+     * in its subtree_control before a child cgroup can use it.
+     * Both writes are best-effort — some systems (systemd-managed) may
+     * restrict direct writes to the root cgroup.
+     */
     write_file("/sys/fs/cgroup/cgroup.subtree_control", "+cpu +memory");
+    write_file("/sys/fs/cgroup/cspip/cgroup.subtree_control", "+cpu +memory");
 }
 
 /* ------------------------------------------------------------------ */

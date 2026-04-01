@@ -164,10 +164,15 @@ doneFlags:
 
 	bin := runtimeBin()
 	cmd := exec.Command(bin, runtimeArgs...)
+	// Pass stdin and stdout straight through so the container process
+	// (e.g. an interactive shell) sees a real TTY on both ends.
 	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Pipe stderr so we can extract the "Container started (PID <n>)" line
+	// that the C runtime writes there.  All other stderr lines are forwarded
+	// to our own stderr transparently.
+	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cspip: pipe error: %v\n", err)
 		return 1
@@ -181,7 +186,7 @@ doneFlags:
 	}
 
 	// containerInfo holds the ID and host PID extracted from the runtime's
-	// first output line: "Container <id> started (PID <pid>)".
+	// stderr line: "Container <id> started (PID <pid>)".
 	type containerInfo struct {
 		id  string
 		pid int
@@ -189,33 +194,35 @@ doneFlags:
 	startCh := make(chan containerInfo, 1)
 
 	// goroutineStartLineFormat is the exact message printed by the C runtime
-	// (container.c, container_run) when the container process has been started.
-	// Any change to that message must be reflected here.
+	// (container.c, container_run) to stderr when the container process has
+	// been started.  Any change to that message must be reflected here.
 	const goroutineStartLineFormat = "Container %s started (PID %d)"
 	go func() {
-		reader := bufio.NewReader(stdoutPipe)
+		reader := bufio.NewReader(stderrPipe)
+		for {
+			line, err := reader.ReadString('\n')
+			trimmed := strings.TrimRight(line, "\r\n")
 
-		// Read the first line — this contains "Container <id> started (PID <pid>)".
-		firstLine, err := reader.ReadString('\n')
-		firstLine = strings.TrimRight(firstLine, "\r\n")
-		if firstLine != "" {
-			fmt.Println(firstLine) // forward to our stdout
-		}
-		if err != nil && err != io.EOF {
-			startCh <- containerInfo{}
-		} else {
-			var id string
-			var pid int
-			if n, _ := fmt.Sscanf(firstLine, goroutineStartLineFormat, &id, &pid); n == 2 && pid > 0 {
-				startCh <- containerInfo{id: id, pid: pid}
-			} else {
-				startCh <- containerInfo{}
+			if trimmed != "" {
+				var id string
+				var pid int
+				if n, _ := fmt.Sscanf(trimmed, goroutineStartLineFormat, &id, &pid); n == 2 && pid > 0 {
+					// Echo the announcement to the user and signal the main goroutine.
+					fmt.Fprintln(os.Stderr, trimmed)
+					startCh <- containerInfo{id: id, pid: pid}
+					// Forward the rest of stderr (warnings, errors) transparently.
+					io.Copy(os.Stderr, reader) //nolint:errcheck
+					return
+				}
+				// Non-matching line (e.g. cgroup warnings) — forward as-is.
+				fmt.Fprintln(os.Stderr, trimmed)
 			}
-		}
 
-		// Forward the remainder of stdout transparently.
-		if _, err := io.Copy(os.Stdout, reader); err != nil {
-			fmt.Fprintf(os.Stderr, "cspip: stdout forwarding error: %v\n", err)
+			if err != nil {
+				// Pipe closed (process exited) without finding the start line.
+				startCh <- containerInfo{}
+				return
+			}
 		}
 	}()
 

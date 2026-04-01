@@ -353,10 +353,12 @@ int container_run(ContainerConfig *config)
     st.pid    = pid;
     write_state(&st);
 
-    fprintf(stdout, "Container %s started (PID %d)\n", config->id, pid);
-    fflush(stdout); /* force the line out of the stdio buffer immediately;
-                     * stdout is a pipe when invoked from the Go wrapper and
-                     * would otherwise be block-buffered until process exit */
+    /* Write the "started" announcement to stderr, not stdout.
+     * The Go wrapper pipes stderr to extract this line; stdout is passed
+     * through directly to the terminal so the container process (e.g. a
+     * shell) sees a real TTY and behaves interactively. */
+    fprintf(stderr, "Container %s started (PID %d)\n", config->id, pid);
+    fflush(stderr);
 
     /* -------------------------------------------------------------- */
     /* 6. Wait for the container to finish.                            */
