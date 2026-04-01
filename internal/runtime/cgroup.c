@@ -148,8 +148,8 @@ static void enable_controllers(void)
      * Both writes are best-effort — some systems (systemd-managed) may
      * restrict direct writes to the root cgroup.
      */
-    write_file("/sys/fs/cgroup/cgroup.subtree_control", "+cpu +memory");
-    write_file("/sys/fs/cgroup/cspip/cgroup.subtree_control", "+cpu +memory");
+    write_file("/sys/fs/cgroup/cgroup.subtree_control", "+cpu +memory +io");
+    write_file("/sys/fs/cgroup/cspip/cgroup.subtree_control", "+cpu +memory +io");
 }
 
 /* ------------------------------------------------------------------ */

@@ -238,9 +238,9 @@ doneFlags:
 	var profilerDone chan []profiler.ProfileSnapshot
 	if info.pid > 0 {
 		profilerDone = make(chan []profiler.ProfileSnapshot, 1)
-		go func(pid int) {
-			profilerDone <- profiler.StartSampler(pid)
-		}(info.pid)
+		go func(pid int, id string) {
+			profilerDone <- profiler.StartSampler(pid, id)
+		}(info.pid, info.id)
 	}
 
 	// Wait for the runtime process to finish.
