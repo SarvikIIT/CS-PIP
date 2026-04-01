@@ -14,21 +14,29 @@ RUNTIME_SRCS = \
 	$(RUNTIME_DIR)/rootfs.c \
 	$(RUNTIME_DIR)/network.c
 
-CMD_SRCS  = $(CMD_DIR)/main.c
+CMD_SRCS  = cmd/cspip-runtime/main.c
 TEST_SRCS = $(TEST_DIR)/runtime_test.c
 
 RUNTIME_OBJS = $(patsubst %.c, $(BUILD_DIR)/%.o, $(RUNTIME_SRCS))
 CMD_OBJS     = $(patsubst %.c, $(BUILD_DIR)/%.o, $(CMD_SRCS))
 TEST_OBJS    = $(patsubst %.c, $(BUILD_DIR)/%.o, $(TEST_SRCS))
 
-TARGET      = $(BUILD_DIR)/cspip
-TEST_TARGET = $(BUILD_DIR)/runtime_test
+# C runtime binary (container lifecycle: run/exec/inspect/ps/stop/kill/rm)
+RUNTIME_TARGET = $(BUILD_DIR)/cspip-runtime
+# Go CLI binary  (wraps runtime + implements profiling and report command)
+GO_TARGET      = $(BUILD_DIR)/cspip
+TEST_TARGET    = $(BUILD_DIR)/runtime_test
 
-.PHONY: all clean test rootfs
+.PHONY: all build build-runtime build-go clean test test-go rootfs install
 
-all: $(TARGET)
+all: build
 
-$(TARGET): $(RUNTIME_OBJS) $(CMD_OBJS)
+build: build-runtime build-go
+
+# Build the C container runtime binary.
+build-runtime: $(RUNTIME_TARGET)
+
+$(RUNTIME_TARGET): $(RUNTIME_OBJS) $(CMD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TEST_TARGET): $(RUNTIME_OBJS) $(TEST_OBJS)
@@ -38,8 +46,18 @@ $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Build the Go CLI binary.
+build-go:
+	@mkdir -p $(BUILD_DIR)
+	go build -o $(GO_TARGET) ./cmd/cspip/
+
+# Run C runtime unit tests (requires root).
 test: $(TEST_TARGET)
 	sudo $(TEST_TARGET)
+
+# Run Go unit tests (no root required).
+test-go:
+	go test ./...
 
 # Set up a minimal busybox rootfs (requires busybox installed on host)
 rootfs:
@@ -60,5 +78,6 @@ rootfs:
 clean:
 	rm -rf $(BUILD_DIR)
 
-install: $(TARGET)
-	install -m 755 $(TARGET) /usr/local/bin/cspip
+install: build
+	install -m 755 $(RUNTIME_TARGET) /usr/local/bin/cspip-runtime
+	install -m 755 $(GO_TARGET) /usr/local/bin/cspip
