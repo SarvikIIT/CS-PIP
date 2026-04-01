@@ -354,6 +354,9 @@ int container_run(ContainerConfig *config)
     write_state(&st);
 
     fprintf(stdout, "Container %s started (PID %d)\n", config->id, pid);
+    fflush(stdout); /* force the line out of the stdio buffer immediately;
+                     * stdout is a pipe when invoked from the Go wrapper and
+                     * would otherwise be block-buffered until process exit */
 
     /* -------------------------------------------------------------- */
     /* 6. Wait for the container to finish.                            */

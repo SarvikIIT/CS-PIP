@@ -7,6 +7,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 
 #include "namespace.h"
 
@@ -64,28 +65,44 @@ int ns_mount_dev(void)
         return -1;
     }
 
-    /* Bind-mount host device nodes the container needs. */
-    static const char *devnodes[] = {
-        "/dev/null", "/dev/zero", "/dev/urandom",
-        "/dev/random", "/dev/tty", NULL
+    /*
+     * Create the device nodes directly with mknod(2).
+     *
+     * We cannot bind-mount host device paths here because this function
+     * runs after pivot_root has swapped the root and the old host
+     * filesystem has been unmounted — host paths like /dev/null are
+     * no longer accessible.  mknod creates the nodes directly inside
+     * the container's /dev tmpfs.
+     */
+    static const struct {
+        const char *path;
+        mode_t      mode;          /* S_IFCHR | permissions */
+        unsigned int major_num;
+        unsigned int minor_num;
+    } devs[] = {
+        { "/dev/null",    S_IFCHR | 0666, 1, 3 },
+        { "/dev/zero",    S_IFCHR | 0666, 1, 5 },
+        { "/dev/full",    S_IFCHR | 0666, 1, 7 },
+        { "/dev/random",  S_IFCHR | 0444, 1, 8 },
+        { "/dev/urandom", S_IFCHR | 0444, 1, 9 },
+        { "/dev/tty",     S_IFCHR | 0666, 5, 0 },
+        { NULL, 0, 0, 0 },
     };
 
-    for (int i = 0; devnodes[i]; i++) {
-        /* Create an empty file as the bind-mount target. */
-        int fd = open(devnodes[i] + 1,   /* relative under new /dev */
-                      O_CREAT | O_WRONLY, 0666);
-        if (fd >= 0) close(fd);
-
-        char dest[64];
-        snprintf(dest, sizeof(dest), "/dev/%s",
-                 strrchr(devnodes[i], '/') + 1);
-
-        if (mount(devnodes[i], dest, NULL, MS_BIND, NULL) < 0) {
-            /* Non-fatal: some nodes may not exist on the host. */
-            fprintf(stderr, "warn: bind-mount %s: %s\n",
-                    devnodes[i], strerror(errno));
+    for (int i = 0; devs[i].path; i++) {
+        if (mknod(devs[i].path, devs[i].mode,
+                  makedev(devs[i].major_num, devs[i].minor_num)) < 0
+            && errno != EEXIST) {
+            fprintf(stderr, "warn: mknod %s: %s\n",
+                    devs[i].path, strerror(errno));
         }
     }
+
+    /* /dev/stdin, /dev/stdout, /dev/stderr as symlinks. */
+    symlink("/proc/self/fd/0", "/dev/stdin");
+    symlink("/proc/self/fd/1", "/dev/stdout");
+    symlink("/proc/self/fd/2", "/dev/stderr");
+
     return 0;
 }
 

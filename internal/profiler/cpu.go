@@ -78,7 +78,7 @@ func (c *CPUTracker) GetCPUPercent(pid int) (float64, error) {
     c.prevTicks = currTicks
     c.prevTime = currTime
 
-    // clock ticks per second (usually 100)
+    // clock ticks per second (100 on virtually all Linux systems)
     clockTicks := float64(100)
 
     cpuPercent := (float64(deltaTicks) / clockTicks) / deltaTime * 100
