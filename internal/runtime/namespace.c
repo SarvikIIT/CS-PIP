@@ -99,9 +99,9 @@ int ns_mount_dev(void)
     }
 
     /* /dev/stdin, /dev/stdout, /dev/stderr as symlinks. */
-    symlink("/proc/self/fd/0", "/dev/stdin");
-    symlink("/proc/self/fd/1", "/dev/stdout");
-    symlink("/proc/self/fd/2", "/dev/stderr");
+    (void)symlink("/proc/self/fd/0", "/dev/stdin");
+    (void)symlink("/proc/self/fd/1", "/dev/stdout");
+    (void)symlink("/proc/self/fd/2", "/dev/stderr");
 
     return 0;
 }
