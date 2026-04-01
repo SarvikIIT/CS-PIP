@@ -1,11 +1,15 @@
 package profiler
 
 import (
+    "context"
     "syscall"
     "time"
 )
 
-func StartSampler(pid int) []ProfileSnapshot {
+// StartSampler samples the resource usage of the process identified by pid
+// until it exits or ctx is cancelled.  The caller should cancel ctx once the
+// monitored process has been waited for to guarantee prompt goroutine exit.
+func StartSampler(ctx context.Context, pid int) []ProfileSnapshot {
     series := make([]ProfileSnapshot, 0, 1000)
 
     cpuTracker, err := NewCPUTracker(pid)
@@ -14,7 +18,11 @@ func StartSampler(pid int) []ProfileSnapshot {
     }
 
     // allow CPU tracker to stabilize
-    time.Sleep(100 * time.Millisecond)
+    select {
+    case <-ctx.Done():
+        return series
+    case <-time.After(100 * time.Millisecond):
+    }
 
     for {
         // check if process is alive
@@ -72,7 +80,12 @@ func StartSampler(pid int) []ProfileSnapshot {
 
         series = append(series, snapshot)
 
-        time.Sleep(100 * time.Millisecond)
+        // context-aware sleep: exit promptly when ctx is cancelled
+        select {
+        case <-ctx.Done():
+            return series
+        case <-time.After(100 * time.Millisecond):
+        }
     }
 
     return series

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -229,10 +230,13 @@ doneFlags:
 
 	// Start the profiler in the background if we have a valid host PID.
 	var profilerDone chan []profiler.ProfileSnapshot
+	var cancelProfiler context.CancelFunc
 	if info.pid > 0 {
 		profilerDone = make(chan []profiler.ProfileSnapshot, 1)
+		var profilerCtx context.Context
+		profilerCtx, cancelProfiler = context.WithCancel(context.Background())
 		go func(pid int) {
-			profilerDone <- profiler.StartSampler(pid)
+			profilerDone <- profiler.StartSampler(profilerCtx, pid)
 		}(info.pid)
 	}
 
@@ -245,14 +249,20 @@ doneFlags:
 	}
 	duration := time.Since(startTime)
 
+	// Cancel the profiler now that the container has exited; this ensures the
+	// sampler goroutine stops promptly even if the PID has been reused.
+	if cancelProfiler != nil {
+		cancelProfiler()
+	}
+
 	// Collect profiler samples (give the sampler goroutine a brief moment to
-	// notice that the process has exited).
+	// notice that it has been cancelled and drain its final snapshot).
 	var series []profiler.ProfileSnapshot
 	if profilerDone != nil {
 		select {
 		case s := <-profilerDone:
 			series = s
-		case <-time.After(3 * time.Second):
+		case <-time.After(1 * time.Second):
 			fmt.Fprintf(os.Stderr, "warn: profiler did not finish in time; report will have partial data\n")
 		}
 	}
