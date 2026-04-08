@@ -8,13 +8,13 @@ A lightweight Docker-like container runtime with an integrated profiling engine 
 
 - [Project Overview](#project-overview)
 - [Architecture Overview](#architecture-overview)
+- [How It Works — Plain English Guide](#how-it-works--plain-english-guide)
 - [Folder Structure](#folder-structure)
 - [Stage-by-Stage Development Guide](#stage-by-stage-development-guide)
   - [Stage 1: Container Runtime](#stage-1-container-runtime-foundation)
   - [Stage 2: Profiling and Monitoring Layer](#stage-2-profiling-and-monitoring-layer)
   - [Stage 3: Behavioral Analysis Engine](#stage-3-behavioral-analysis-engine)
   - [Stage 4: Reporting System](#stage-4-reporting-system)
-  - [Stage 5: Advanced Extensions](#stage-5-advanced-extensions)
 - [Build and Run](#build-and-run)
 - [Dependencies](#dependencies)
 - [Evaluation Criteria](#evaluation-criteria)
@@ -66,6 +66,295 @@ CSPIP provides:
 
 ---
 
+## How It Works — Plain English Guide
+
+This section walks through every part of CSPIP as if you have never seen a container, a kernel, or a profiler before. Start here.
+
+---
+
+### What is a "container"?
+
+A **container** is just a normal Linux process that has been tricked into thinking it is running on its own private computer. It is not a virtual machine — there is no separate operating system installed. The container process shares the same Linux kernel as the host, but the kernel uses **namespaces** and **cgroups** to give the container an isolated, restricted view of the system.
+
+Think of it like a room inside a house. The house (Linux kernel) is shared, but the room has its own lock, its own furniture, and a sign on the door saying "this is your whole world". The process inside the container cannot see the other rooms.
+
+---
+
+### Part 1 — How the Container Runtime Works
+
+#### Namespaces — giving the container its own world
+
+A namespace is a kernel feature that limits what a process can see. CSPIP creates four types of namespace for every container:
+
+| Namespace | What the container gets | Without it |
+|-----------|------------------------|------------|
+| **PID**   | Its own process list, starting at PID 1 | Would see all processes on the host |
+| **Mount** | Its own filesystem tree | Would see all mounts on the host |
+| **UTS**   | Its own hostname | Would share the host's hostname |
+| **Network** | Its own network interfaces | Would share the host network |
+
+All four namespaces are created in one `clone()` system call — the same system call that creates a new process. The `clone()` call is like `fork()`, but with extra flags that say "put this child into new namespaces".
+
+```c
+// internal/runtime/namespace.c  — simplified
+pid_t pid = clone(
+    child_start,
+    stack_top,
+    CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET | SIGCHLD,
+    &args
+);
+```
+
+When this returns in the parent, `pid` is the container's PID on the host. Inside the container, the process sees itself as PID 1.
+
+#### Root filesystem — giving the container its own files
+
+After the namespaces are created, the container process needs its own filesystem so it cannot read or modify the host's files. CSPIP does this with a technique called **pivot_root** (or `chroot` as a fallback):
+
+1. Bind-mount the `rootfs/` directory (a small folder with `busybox`, `etc/`, `proc/`, `tmp/`) onto itself so it becomes a mount point.
+2. Mount `/proc` inside it (the container needs `/proc` for tools like `ps` and `top`).
+3. Call `pivot_root()` — this swaps the container's view of `/` so that `rootfs/` becomes `/`. The old host root is temporarily visible at `/old_root/`, then unmounted and hidden.
+
+After this, any file path the container uses (e.g. `/bin/sh`) resolves relative to `rootfs/`, not the host's real `/`.
+
+#### cgroups — limiting CPU and memory
+
+**cgroups** (control groups) are a kernel mechanism for enforcing resource limits on a group of processes. Every container in CSPIP gets its own cgroup under `/sys/fs/cgroup/cspip/<container-id>/`.
+
+To limit a container to 50% of one CPU:
+```
+# written to /sys/fs/cgroup/cspip/<id>/cpu.max
+50000 100000
+```
+This says: in every 100,000 µs window, allow at most 50,000 µs of CPU time.
+
+To limit memory to 256 MB:
+```
+# written to /sys/fs/cgroup/cspip/<id>/memory.max
+268435456
+```
+
+The container's PID is added to the cgroup's `cgroup.procs` file. From that moment, the kernel enforces the limit automatically. If the process tries to use more memory, the kernel kills it with an out-of-memory (OOM) event.
+
+#### Container lifecycle
+
+`internal/runtime/container.c` manages the lifecycle:
+
+1. **create** — generates a unique container ID (8-character hex), writes a JSON state file to `~/.cspip/containers/<id>.json`, clones the process into new namespaces, sets up rootfs and cgroups, then `exec()`s the requested command inside the container.
+2. **start/run** — waits for the container process to finish and records the exit code.
+3. **stop** — sends `SIGTERM` to the container's host PID (waiting up to 10 s), then `SIGKILL` if needed.
+4. **kill** — sends `SIGKILL` immediately.
+5. **rm** — deletes the state file and cgroup directory.
+6. **inspect** — reads the state file and prints it as JSON.
+7. **ps** — lists all state files in `~/.cspip/containers/`.
+
+---
+
+### Part 2 — How the Profiler Works
+
+Once the container is running, the **Go profiler** (`internal/profiler/`) samples the container process every 100 ms from the host. It reads Linux's `/proc` virtual filesystem — a set of special files the kernel maintains in RAM that expose real-time process statistics.
+
+#### CPU usage — `internal/profiler/cpu.go`
+
+`/proc/<pid>/stat` is a single-line file with 50+ space-separated fields. Fields 14 and 15 are `utime` (user-mode CPU ticks) and `stime` (kernel-mode CPU ticks). Each tick is 1/100th of a second by default.
+
+```
+# /proc/1234/stat example (fields numbered from 1):
+1234 (stress) R 1 1234 ... 12300 5100 ...
+                              ↑     ↑
+                            utime  stime  (fields 14 & 15)
+```
+
+The profiler reads these two values, waits 100 ms, reads them again, and computes:
+
+```
+cpu% = ((Δticks / clock_ticks_per_second) / Δtime_seconds) / num_cpus * 100
+```
+
+This gives a per-CPU-core percentage. For example, if `Δticks = 10` and `Δtime = 0.1 s`, that is 100 ticks/s out of 100 ticks/s per core = 100% of one core.
+
+#### Memory — `internal/profiler/memory.go`
+
+`/proc/<pid>/status` contains a line `VmRSS: 128456 kB`. **RSS** (Resident Set Size) is the amount of RAM currently occupied by the process — pages that are actually in physical memory right now, not swapped to disk.
+
+`/proc/<pid>/smaps_rollup` gives a breakdown of how that memory is used:
+- **Anonymous** — heap, stack, memory allocated by `malloc()`. Not backed by a file.
+- **File** — shared libraries (`.so` files), memory-mapped files.
+
+#### Page faults and context switches — `internal/profiler/pagefault.go`, `context_switch.go`
+
+Both come from `/proc/<pid>/status`:
+
+- **Minor fault** — the process accessed a memory address that is valid but whose page is not yet mapped into its page table. The kernel fixes this cheaply in memory (no disk access needed).
+- **Major fault** — the page had been swapped to disk. The kernel must read it back from disk. This is expensive (milliseconds, not microseconds).
+- **Voluntary context switch** — the process called `sleep()`, `read()`, or waited on I/O. It gave up the CPU on purpose.
+- **Involuntary context switch** — the kernel's scheduler preempted the process because its time slice expired.
+
+High involuntary context switches = many competing processes fighting for CPU. High major faults = the working set does not fit in RAM (memory pressure).
+
+#### I/O — `internal/profiler/io.go`
+
+`/proc/<pid>/io` tracks cumulative bytes:
+
+```
+rchar: 102400      ← total bytes read (including cached)
+wchar: 81920       ← total bytes written
+read_bytes: 4096   ← bytes read from actual storage (uncached)
+write_bytes: 0     ← bytes written to actual storage
+```
+
+The profiler stores the previous sample's `read_bytes` / `write_bytes`, then subtracts to compute the delta. This gives the I/O throughput over the last 100 ms interval.
+
+#### Unified sampler — `internal/profiler/sampler.go`
+
+`StartSampler(pid)` is called once and runs in a goroutine. It loops every 100 ms:
+
+1. Check `kill(pid, 0)` — if the process no longer exists, stop.
+2. Call all the metric readers above.
+3. Append a `ProfileSnapshot` (a struct with every metric and a timestamp) to an in-memory slice.
+4. Sleep 100 ms and repeat.
+
+When the process exits, the slice of snapshots is returned to the main goroutine.
+
+---
+
+### Part 3 — How the Analyzer Works
+
+With hundreds of snapshots collected, the **analyzer** (`internal/analyzer/`) inspects the time-series data and draws conclusions.
+
+#### Workload classification — `internal/analyzer/classifier.go`
+
+The classifier computes three scores by averaging across all snapshots:
+
+| Score | High means… | Threshold |
+|-------|-------------|-----------|
+| CPU   | Process spends most of its time executing code | avg CPU > 70% |
+| Memory | Process uses a lot of RAM and accesses it heavily | avg RSS > 70% of cgroup limit |
+| I/O   | Process reads or writes large amounts of data | avg I/O throughput > threshold |
+
+The highest score wins:
+- **CPU-bound** — bottleneck is processor speed
+- **Memory-bound** — bottleneck is RAM capacity or bandwidth
+- **I/O-bound** — bottleneck is disk or network speed
+- **Mixed** — no single dimension dominates
+
+Confidence is `HIGH` when the winning score is clearly ahead, `MEDIUM` when close, `LOW` when all scores are similar.
+
+#### Bottleneck detection — `internal/analyzer/bottleneck.go`
+
+Bottleneck detection checks absolute thresholds on individual snapshots and flags any that cross a danger line:
+
+- CPU > 90% sustained → CPU pressure
+- RSS > 90% of cgroup limit → memory pressure (risk of OOM kill)
+- Major faults per second > 100 → thrashing (RAM too small, paging to disk)
+- Involuntary context switches per second > 500 → CPU contention
+
+Each detected issue is a `Bottleneck` with a severity (LOW / MEDIUM / HIGH / CRITICAL) and a human-readable message.
+
+#### Pattern analysis — `internal/analyzer/pattern.go`
+
+Patterns look for structure in the time-series:
+
+- **Spike** — a sudden brief jump in CPU or I/O, much higher than the average
+- **Ramp** — a steady increase over time (e.g. a memory leak, or a warming cache)
+- **Oscillation** — periodic up-down cycles (e.g. a producer/consumer or GC cycle)
+- **Plateau** — flat, steady usage (normal steady-state operation)
+
+Patterns are detected by computing rolling averages, standard deviations, and simple trend slopes over the snapshot series.
+
+---
+
+### Part 4 — How the Reporter Works
+
+The **reporter** (`internal/reporter/`) takes the raw analysis results and formats them for humans or machines.
+
+#### Summary statistics — `internal/reporter/summary.go`
+
+Reduces all snapshots to aggregate statistics: min, max, average, and 95th-percentile for each metric. The 95th percentile is the value that 95% of samples are below — it captures worst-case behavior without being thrown off by a single extreme outlier.
+
+#### Text report — `internal/reporter/text_renderer.go`
+
+Renders a human-readable table to stdout:
+
+```
+=== CSPIP Performance Report ===
+Container:  abc12345
+Command:    /bin/stress --cpu 2 --timeout 10
+Duration:   10.23 s   Exit: 0
+
+--- Resource Summary ---
+CPU:        avg 87.3%   peak 99.1%   p95 94.2%
+Memory RSS: avg 48 MB   peak 52 MB
+...
+
+--- Classification ---
+CPU-BOUND  (confidence: HIGH)
+
+--- Bottlenecks ---
+[HIGH] CPU usage sustained above 90% for 8.1 s
+
+--- Suggestions ---
+- The workload is CPU-bound. Consider parallelising across more cores,
+  or raising the --cpu-limit.
+```
+
+#### JSON report — `internal/reporter/json_renderer.go`
+
+Renders the same data as a structured JSON object. Useful for piping into dashboards, storing results, or automated comparison.
+
+#### Alerts and suggestions — `internal/reporter/alert.go`
+
+Converts the analyzer's bottleneck list into user-facing alerts and pairs them with actionable suggestions (e.g. "increase memory limit", "check for unbounded loops").
+
+---
+
+### Full request lifecycle — what happens when you run `cspip run`
+
+Here is the complete sequence of events when you type:
+
+```bash
+sudo ./cspip run --cpu-limit 50% --mem-limit 256m ./rootfs /bin/sh
+```
+
+```
+1.  cspip (Go)  parses flags and builds argv for cspip-runtime.
+2.  cspip (Go)  fork/exec's cspip-runtime with those arguments.
+3.  cspip-runtime (C) calls container_run():
+      a. Generates a container ID (e.g. "ab3f9c12").
+      b. Creates the cgroup hierarchy under /sys/fs/cgroup/cspip/ab3f9c12/.
+      c. Writes cpu.max and memory.max to the cgroup.
+      d. Calls clone() with CLONE_NEWPID|CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWNET.
+      e. The child process (now PID 1 in its namespace):
+           - Calls setup_rootfs() → bind-mount rootfs/, mount /proc, pivot_root().
+           - Calls setup_network() → configure loopback.
+           - Adds itself to the cgroup (writes its PID to cgroup.procs).
+           - exec()s /bin/sh (or whatever command was requested).
+      f. The parent prints: "Container ab3f9c12 started (PID 4523)" to stdout.
+4.  cspip (Go)  reads that first line, extracts the container ID and host PID (4523).
+5.  cspip (Go)  launches StartSampler(4523) in a goroutine.
+      - Every 100 ms it reads /proc/4523/stat, /proc/4523/status, /proc/4523/io.
+      - It appends a ProfileSnapshot to an in-memory slice.
+6.  The user interacts with /bin/sh inside the container.
+7.  The user types "exit" (or the command finishes).
+8.  cspip-runtime (C) exit code propagates back; cspip (Go) cmd.Wait() returns.
+9.  cspip (Go)  calls StartSampler's channel — gets the slice of snapshots.
+10. cspip (Go)  serialises a RunRecord to ~/.cspip/runs/ab3f9c12.json.
+      - RunRecord contains: container ID, command, duration, exit code, limits, snapshots.
+11. cspip prints: "Run record saved. Generate report with: cspip report ab3f9c12"
+
+Later:
+12. User runs: cspip report ab3f9c12
+13. cspip (Go)  loads ~/.cspip/runs/ab3f9c12.json.
+14. Passes the snapshot series through:
+      analyzer.Classify()         → WorkloadType + Confidence
+      analyzer.AnalyzePatterns()  → []Pattern
+      analyzer.DetectBottlenecks() → []Bottleneck
+15. Passes everything through reporter.BuildSummary(), reporter.GenerateAlerts().
+16. Calls reporter.RenderText() or reporter.RenderJSON() and prints to stdout.
+```
+
+---
+
 ## Folder Structure
 
 ```
@@ -104,7 +393,7 @@ CSPIP/
 │   │   ├── classifier.go              # CPU-bound / Memory-bound / I/O-bound rules
 │   │   ├── bottleneck.go              # Threshold-based bottleneck detection
 │   │   ├── pattern.go                 # Time-series pattern recognition
-│   │   ├── fingerprint.go             # (Stage 5) Behavioral fingerprinting
+│   │   ├── fingerprint.go             # Behavioral fingerprinting
 │   │   └── types.go                   # AnalysisResult, WorkloadClass structs
 │   │
 │   ├── reporter/                      # Stage 4: Reporting System
@@ -114,7 +403,7 @@ CSPIP/
 │   │   ├── alert.go                   # Bottleneck alert generation
 │   │   └── types.go                   # Report structs
 │   │
-│   └── store/                         # Persistent run data (Stage 5 comparison)
+│   └── store/                         # Persistent run data
 │       ├── db.go                      # Simple file-based or SQLite store
 │       └── types.go                   # RunRecord struct
 │
@@ -776,84 +1065,6 @@ cspip report <container-id> --output report.json  # save to file
 
 ---
 
-### Stage 5: Advanced Extensions
-
-**Goal:** Add intelligence that grows with repeated use — comparing runs, fingerprinting behavior, and automatically adjusting profiling intensity.
-
----
-
-#### Step 5.1 — Run-to-Run Comparison
-
-**Files:** `internal/store/db.go`, `internal/store/types.go`
-
-**How it works:**
-1. At the end of every run, serialize the `AnalysisResult` to disk as a JSON file in `~/.cspip/runs/<run-id>.json`.
-2. The `cspip compare` command loads two run files and computes deltas.
-
-```bash
-cspip compare <run-id-1> <run-id-2>
-
-# Output:
-Metric              Run A       Run B       Delta
-CPU avg             87.3%       61.2%       -26.1%  ✓ improved
-Memory peak         192 MB      210 MB      +18 MB  ✗ regressed
-I/O Write           0.1 MB/s    4.2 MB/s    +4.1 MB/s (new I/O pattern)
-Classification      CPU-bound   Mixed       changed
-```
-
-This is useful for benchmarking code changes — run the same workload before and after a change and see if it got better or worse.
-
----
-
-#### Step 5.2 — Behavioral Fingerprinting
-
-**File:** `internal/analyzer/fingerprint.go`
-
-**Concept:** Encode each run as a fixed-length vector of normalized metrics, then compare vectors across runs to detect regressions.
-
-```
-Fingerprint vector = [
-  avg_cpu_normalized,       // 0.0 to 1.0
-  avg_mem_normalized,       // relative to cgroup limit
-  avg_io_normalized,        // relative to disk bandwidth
-  syscall_read_fraction,    // fraction of syscalls that are read()
-  syscall_write_fraction,
-  context_switch_rate,
-  major_fault_rate
-]
-```
-
-**Distance metric:** Use Euclidean distance or cosine similarity between two fingerprint vectors.
-- Distance near 0 → runs are behaviorally identical
-- Distance > 0.3 → significant behavioral change detected
-
-**Use case:** Automatically flag if a new version of your application has a meaningfully different resource profile from the previous version.
-
----
-
-#### Step 5.3 — Adaptive Profiling
-
-**Concept:** Sampling every 100ms all the time wastes CPU when nothing is changing. Sampling too infrequently misses short bursts.
-
-**Algorithm:**
-
-```
-Start: sample_interval = 1000ms (coarse)
-
-Every sample:
-  Compute variance of last 5 CPU readings.
-  IF variance > threshold:
-    sample_interval = max(50ms, sample_interval / 2)   ← zoom in
-    log("High variance detected, increasing sample rate")
-  ELSE IF variance < threshold/4:
-    sample_interval = min(1000ms, sample_interval * 2)  ← zoom out
-    log("Low variance, reducing sample rate")
-```
-
-This gives fine-grained data during bursty or unusual behavior, and low overhead during steady-state execution.
-
----
-
 ## Build and Run
 
 ```bash
@@ -879,9 +1090,6 @@ make test
 # Generate a report
 sudo ./cspip report <container-id>
 sudo ./cspip report <container-id> --format json --output report.json
-
-# Compare two runs
-./cspip compare <run-id-1> <run-id-2>
 ```
 
 ---
@@ -908,4 +1116,3 @@ sudo ./cspip report <container-id> --format json --output report.json
 | 2     | Metric accuracy and profiler overhead                                 | CPU/mem/IO readings within 5% of `top`/`iostat`; profiler uses < 2% CPU |
 | 3     | Workload classification correctness                                   | Correct class for all 3 test workloads with HIGH confidence |
 | 4     | Report clarity, alert accuracy, JSON schema validity                  | Reports match expected output; JSON passes schema validation |
-| 5     | Comparison accuracy, fingerprinting usefulness, adaptive behavior     | Regressions detected; adaptive sampling reduces overhead |
